@@ -1,0 +1,70 @@
+package {
+    default_team: "trendy_team_haptics_framework",
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "hardware_interfaces_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["hardware_interfaces_license"],
+}
+
+aidl_interface {
+    name: "android.hardware.vibrator",
+    vendor_available: true,
+    host_supported: true,
+    srcs: [
+        "android/hardware/vibrator/*.aidl",
+        "android/hardware/vibrator/hapticgenerator/*.aidl",
+    ],
+    imports: [
+        "android.hardware.common-V2",
+        "android.hardware.common.fmq-V1",
+        "android.media.audio.common.types-V5",
+    ],
+    headers: [
+        "PersistableBundle_aidl",
+    ],
+    stability: "vintf",
+    backend: {
+        java: {
+            sdk_version: "system_current",
+        },
+        ndk: {
+            enabled: true,
+        },
+        cpp: {
+            enabled: false,
+        },
+        rust: {
+            enabled: true,
+            gen_mockall: true,
+            additional_rustlibs: [
+                "libmockall",
+            ],
+        },
+    },
+    versions_with_info: [
+        {
+            version: "1",
+            imports: [],
+        },
+        {
+            version: "2",
+            imports: [],
+        },
+        {
+            version: "3",
+            imports: [],
+        },
+        {
+            version: "4",
+            imports: [
+                "android.hardware.common-V2",
+                "android.hardware.common.fmq-V1",
+                "android.media.audio.common.types-V5",
+            ],
+        },
+
+    ],
+    frozen: true,
+}

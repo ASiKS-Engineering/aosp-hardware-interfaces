@@ -1,0 +1,755 @@
+/*
+ * Copyright (C) 2020 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#include <aidl/Gtest.h>
+#include <aidl/Vintf.h>
+
+#include <aidl/android/hardware/weaver/IWeaver.h>
+#include <android-base/file.h>
+#include <android-base/parseint.h>
+#include <android-base/properties.h>
+#include <android-base/strings.h>
+#include <android/binder_manager.h>
+#include <android/binder_process.h>
+#include <android/hardware/weaver/1.0/IWeaver.h>
+#include <hidl/GtestPrinter.h>
+#include <hidl/ServiceManagement.h>
+#include <chrono>
+#include <thread>
+
+#include <limits>
+
+using ::aidl::android::hardware::weaver::IWeaver;
+using ::aidl::android::hardware::weaver::WeaverConfig;
+using ::aidl::android::hardware::weaver::WeaverReadResponse;
+using ::aidl::android::hardware::weaver::WeaverReadStatus;
+
+using HidlIWeaver = ::android::hardware::weaver::V1_0::IWeaver;
+using HidlWeaverConfig = ::android::hardware::weaver::V1_0::WeaverConfig;
+using HidlWeaverReadStatus = ::android::hardware::weaver::V1_0::WeaverReadStatus;
+using HidlWeaverReadResponse = ::android::hardware::weaver::V1_0::WeaverReadResponse;
+using HidlWeaverStatus = ::android::hardware::weaver::V1_0::WeaverStatus;
+
+const std::string kSlotMapFile = "/metadata/password_slots/slot_map";
+const std::vector<uint8_t> KEY{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+const std::vector<uint8_t> WRONG_KEY{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+const std::vector<uint8_t> VALUE{16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1};
+const std::vector<uint8_t> OTHER_VALUE{0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 255, 255};
+
+class WeaverAdapter {
+  public:
+    virtual ~WeaverAdapter() {}
+    virtual bool isReady() = 0;
+    virtual ::ndk::ScopedAStatus getInterfaceVersion(int32_t* _aidl_return) = 0;
+    virtual ::ndk::ScopedAStatus getConfig(WeaverConfig* _aidl_return) = 0;
+    virtual ::ndk::ScopedAStatus read(int32_t in_slotId, const std::vector<uint8_t>& in_key,
+                                      WeaverReadResponse* _aidl_return) = 0;
+    virtual ::ndk::ScopedAStatus write(int32_t in_slotId, const std::vector<uint8_t>& in_key,
+                                       const std::vector<uint8_t>& in_value) = 0;
+    virtual ::ndk::ScopedAStatus warmUp() = 0;
+    virtual ::ndk::ScopedAStatus getTimeout(int32_t in_slotId, int64_t* _aidl_return) = 0;
+};
+
+class WeaverAidlAdapter : public WeaverAdapter {
+  public:
+    WeaverAidlAdapter(const std::string& param)
+        : aidl_weaver_(IWeaver::fromBinder(
+                  ::ndk::SpAIBinder(AServiceManager_waitForService(param.c_str())))) {}
+    ~WeaverAidlAdapter() {}
+
+    bool isReady() { return aidl_weaver_ != nullptr; }
+
+    ::ndk::ScopedAStatus getInterfaceVersion(int32_t* _aidl_return) {
+        return aidl_weaver_->getInterfaceVersion(_aidl_return);
+    }
+
+    ::ndk::ScopedAStatus getConfig(WeaverConfig* _aidl_return) {
+        return aidl_weaver_->getConfig(_aidl_return);
+    }
+
+    ::ndk::ScopedAStatus read(int32_t in_slotId, const std::vector<uint8_t>& in_key,
+                              WeaverReadResponse* _aidl_return) {
+        return aidl_weaver_->read(in_slotId, in_key, _aidl_return);
+    }
+
+    ::ndk::ScopedAStatus write(int32_t in_slotId, const std::vector<uint8_t>& in_key,
+                               const std::vector<uint8_t>& in_value) {
+        return aidl_weaver_->write(in_slotId, in_key, in_value);
+    }
+
+    ::ndk::ScopedAStatus warmUp() { return aidl_weaver_->warmUp(); }
+
+    ::ndk::ScopedAStatus getTimeout(int32_t in_slotId, int64_t* _aidl_return) {
+        return aidl_weaver_->getTimeout(in_slotId, _aidl_return);
+    }
+
+  private:
+    std::shared_ptr<IWeaver> aidl_weaver_;
+};
+
+class WeaverHidlAdapter : public WeaverAdapter {
+  public:
+    WeaverHidlAdapter(const std::string& param) : hidl_weaver_(HidlIWeaver::getService(param)) {}
+    ~WeaverHidlAdapter() {}
+
+    bool isReady() { return hidl_weaver_ != nullptr; }
+
+    ::ndk::ScopedAStatus getInterfaceVersion(int32_t* _aidl_return) {
+        *_aidl_return = 0;
+        return ::ndk::ScopedAStatus::ok();
+    }
+
+    ::ndk::ScopedAStatus getConfig(WeaverConfig* _aidl_return) {
+        bool callbackCalled = false;
+        HidlWeaverStatus status;
+        HidlWeaverConfig config;
+        auto ret = hidl_weaver_->getConfig([&](HidlWeaverStatus s, HidlWeaverConfig c) {
+            callbackCalled = true;
+            status = s;
+            config = c;
+        });
+        if (!ret.isOk() || !callbackCalled || status != HidlWeaverStatus::OK) {
+            return ::ndk::ScopedAStatus::fromStatus(STATUS_FAILED_TRANSACTION);
+        }
+        _aidl_return->slots = config.slots;
+        _aidl_return->keySize = config.keySize;
+        _aidl_return->valueSize = config.valueSize;
+        return ::ndk::ScopedAStatus::ok();
+    }
+
+    ::ndk::ScopedAStatus read(int32_t in_slotId, const std::vector<uint8_t>& in_key,
+                              WeaverReadResponse* _aidl_return) {
+        bool callbackCalled = false;
+        HidlWeaverReadStatus status;
+        std::vector<uint8_t> value;
+        uint32_t timeout;
+        auto ret = hidl_weaver_->read(in_slotId, in_key,
+                                      [&](HidlWeaverReadStatus s, HidlWeaverReadResponse r) {
+                                          callbackCalled = true;
+                                          status = s;
+                                          value = r.value;
+                                          timeout = r.timeout;
+                                      });
+        if (!ret.isOk() || !callbackCalled) {
+            return ::ndk::ScopedAStatus::fromStatus(STATUS_FAILED_TRANSACTION);
+        }
+        switch (status) {
+            case HidlWeaverReadStatus::OK:
+                _aidl_return->status = WeaverReadStatus::OK;
+                break;
+            case HidlWeaverReadStatus::FAILED:
+                _aidl_return->status = WeaverReadStatus::FAILED;
+                break;
+            case HidlWeaverReadStatus::INCORRECT_KEY:
+                _aidl_return->status = WeaverReadStatus::INCORRECT_KEY;
+                break;
+            case HidlWeaverReadStatus::THROTTLE:
+                _aidl_return->status = WeaverReadStatus::THROTTLE;
+                break;
+            default:
+                ADD_FAILURE() << "Unknown HIDL read status: " << static_cast<uint32_t>(status);
+                _aidl_return->status = WeaverReadStatus::FAILED;
+                break;
+        }
+        _aidl_return->value = value;
+        _aidl_return->timeout = timeout;
+        return ::ndk::ScopedAStatus::ok();
+    }
+
+    ::ndk::ScopedAStatus write(int32_t in_slotId, const std::vector<uint8_t>& in_key,
+                               const std::vector<uint8_t>& in_value) {
+        auto status = hidl_weaver_->write(in_slotId, in_key, in_value);
+        switch (status) {
+            case HidlWeaverStatus::OK:
+                return ::ndk::ScopedAStatus::ok();
+            case HidlWeaverStatus::FAILED:
+                return ::ndk::ScopedAStatus::fromStatus(STATUS_FAILED_TRANSACTION);
+            default:
+                ADD_FAILURE() << "Unknown HIDL write status: " << status.description();
+                return ::ndk::ScopedAStatus::fromStatus(STATUS_FAILED_TRANSACTION);
+        }
+    }
+
+    ::ndk::ScopedAStatus warmUp() { return ::ndk::ScopedAStatus::ok(); }
+
+    ::ndk::ScopedAStatus getTimeout([[maybe_unused]] int32_t in_slotId,
+                                    [[maybe_unused]] int64_t* _aidl_return) {
+        return ::ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+    }
+
+  private:
+    android::sp<HidlIWeaver> hidl_weaver_;
+};
+
+class WeaverTest : public ::testing::TestWithParam<std::tuple<std::string, std::string>> {
+  protected:
+    void SetUp() override;
+    void TearDown() override;
+    void FindFreeSlots();
+
+    std::unique_ptr<WeaverAdapter> weaver_;
+    WeaverConfig config_;
+    int32_t interface_version_;
+    uint32_t first_free_slot_;
+    uint32_t last_free_slot_;
+};
+
+void WeaverTest::SetUp() {
+    std::string api, instance_name;
+    std::tie(api, instance_name) = GetParam();
+    if (api == "hidl") {
+        weaver_.reset(new WeaverHidlAdapter(instance_name));
+        ASSERT_TRUE(weaver_->isReady());
+
+        auto ret = weaver_->getInterfaceVersion(&interface_version_);
+        ASSERT_TRUE(ret.isOk());
+        ASSERT_EQ(interface_version_, 0);
+        GTEST_LOG_(INFO) << "Interface version: HIDL";
+    } else if (api == "aidl") {
+        weaver_.reset(new WeaverAidlAdapter(instance_name));
+        ASSERT_TRUE(weaver_->isReady());
+
+        auto ret = weaver_->getInterfaceVersion(&interface_version_);
+        ASSERT_TRUE(ret.isOk());
+        ASSERT_GE(interface_version_, 1);
+        GTEST_LOG_(INFO) << "Interface version: AIDL v" << interface_version_;
+    } else {
+        FAIL() << "Bad test parameterization";
+    }
+
+    auto ret = weaver_->getConfig(&config_);
+    ASSERT_TRUE(ret.isOk());
+    ASSERT_GT(config_.slots, 0);
+    GTEST_LOG_(INFO) << "WeaverConfig: slots=" << config_.slots << ", keySize=" << config_.keySize
+                     << ", valueSize=" << config_.valueSize;
+
+    FindFreeSlots();
+    GTEST_LOG_(INFO) << "First free slot is " << first_free_slot_ << ", last free slot is "
+                     << last_free_slot_;
+}
+
+void WeaverTest::TearDown() {
+    // Some of the test cases can leave a timeout in first_free_slot_.
+    // Overwrite the slot to ensure the timeout gets reset to zero.
+    auto ret = weaver_->write(first_free_slot_, KEY, VALUE);
+    EXPECT_TRUE(ret.isOk());
+}
+
+void WeaverTest::FindFreeSlots() {
+    // Determine which Weaver slots are in use by the system. These slots can't be used by the test.
+    std::set<uint32_t> used_slots;
+    if (access(kSlotMapFile.c_str(), F_OK) == 0) {
+        std::string contents;
+        ASSERT_TRUE(android::base::ReadFileToString(kSlotMapFile, &contents))
+                << "Failed to read " << kSlotMapFile;
+        for (const auto& line : android::base::Split(contents, "\n")) {
+            auto trimmed_line = android::base::Trim(line);
+            if (trimmed_line[0] == '#' || trimmed_line[0] == '\0') continue;
+            auto slot_and_user = android::base::Split(trimmed_line, "=");
+            uint32_t slot;
+            ASSERT_TRUE(slot_and_user.size() == 2 &&
+                        android::base::ParseUint(slot_and_user[0], &slot))
+                    << "Error parsing " << kSlotMapFile << " at \"" << line << "\"";
+            GTEST_LOG_(INFO) << "Slot " << slot << " is in use by " << slot_and_user[1];
+            ASSERT_LT(slot, config_.slots);
+            used_slots.insert(slot);
+        }
+    }
+
+    // We should assert !used_slots.empty() here, but that can't be done yet due to
+    // config_disableWeaverOnUnsecuredUsers being supported.  The value of that option is not
+    // accessible from here, so we have to assume it might be set to true.
+
+    // Find the first free slot.
+    int found = 0;
+    for (uint32_t i = 0; i < config_.slots; i++) {
+        if (used_slots.find(i) == used_slots.end()) {
+            first_free_slot_ = i;
+            found++;
+            break;
+        }
+    }
+    // Find the last free slot.
+    for (uint32_t i = config_.slots; i > 0; i--) {
+        if (used_slots.find(i - 1) == used_slots.end()) {
+            last_free_slot_ = i - 1;
+            found++;
+            break;
+        }
+    }
+    ASSERT_EQ(found, 2) << "All Weaver slots are already in use by the system";
+}
+
+/*
+ * Checks config values are suitably large
+ */
+TEST_P(WeaverTest, GetConfig) {
+    EXPECT_GE(config_.slots, 16u);
+    EXPECT_GE(config_.keySize, 16u);
+    EXPECT_GE(config_.valueSize, 16u);
+}
+
+/*
+ * Gets the config twice and checks they are the same
+ */
+TEST_P(WeaverTest, GettingConfigMultipleTimesGivesSameResult) {
+    WeaverConfig config2;
+
+    auto ret = weaver_->getConfig(&config2);
+    ASSERT_TRUE(ret.isOk());
+
+    EXPECT_EQ(config_, config2);
+}
+
+/*
+ * Writes a key and value to the last free slot
+ */
+TEST_P(WeaverTest, WriteToLastSlot) {
+    const auto writeRet = weaver_->write(last_free_slot_, KEY, VALUE);
+    ASSERT_TRUE(writeRet.isOk());
+}
+
+/*
+ * Writes a key and value to a slot
+ * Reads the slot with the same key and receives the value that was previously written
+ */
+TEST_P(WeaverTest, WriteFollowedByReadGivesTheSameValue) {
+    const uint32_t slotId = first_free_slot_;
+    const auto ret = weaver_->write(slotId, KEY, VALUE);
+    ASSERT_TRUE(ret.isOk());
+
+    WeaverReadResponse response;
+    const auto readRet = weaver_->read(slotId, KEY, &response);
+    ASSERT_TRUE(readRet.isOk());
+    EXPECT_EQ(response.value, VALUE);
+    EXPECT_EQ(response.timeout, 0u);
+    EXPECT_EQ(response.status, WeaverReadStatus::OK);
+}
+
+/*
+ * Writes a key and value to a slot
+ * Overwrites the slot with a new key and value
+ * Reads the slot with the new key and receives the new value
+ */
+TEST_P(WeaverTest, OverwritingSlotUpdatesTheValue) {
+    const uint32_t slotId = first_free_slot_;
+    const auto initialWriteRet = weaver_->write(slotId, WRONG_KEY, VALUE);
+    ASSERT_TRUE(initialWriteRet.isOk());
+
+    const auto overwriteRet = weaver_->write(slotId, KEY, OTHER_VALUE);
+    ASSERT_TRUE(overwriteRet.isOk());
+
+    WeaverReadResponse response;
+    const auto readRet = weaver_->read(slotId, KEY, &response);
+    ASSERT_TRUE(readRet.isOk());
+    EXPECT_EQ(response.value, OTHER_VALUE);
+    EXPECT_EQ(response.timeout, 0u);
+    EXPECT_EQ(response.status, WeaverReadStatus::OK);
+}
+
+/*
+ * Writes a key and value to a slot
+ * Reads the slot with a different key so does not receive the value
+ */
+TEST_P(WeaverTest, WriteFollowedByReadWithWrongKeyDoesNotGiveTheValue) {
+    const uint32_t slotId = first_free_slot_;
+    const auto writeRet = weaver_->write(slotId, KEY, VALUE);
+    ASSERT_TRUE(writeRet.isOk());
+
+    WeaverReadResponse response;
+    const auto readRet = weaver_->read(slotId, WRONG_KEY, &response);
+    ASSERT_TRUE(readRet.isOk());
+    EXPECT_TRUE(response.value.empty());
+    EXPECT_EQ(response.status, WeaverReadStatus::INCORRECT_KEY);
+}
+
+/*
+ * Writing to an invalid slot fails
+ */
+TEST_P(WeaverTest, WritingToInvalidSlotFails) {
+    if (config_.slots == std::numeric_limits<uint32_t>::max()) {
+        // If there are no invalid slots then pass
+        return;
+    }
+
+    const auto writeRet = weaver_->write(config_.slots, KEY, VALUE);
+    ASSERT_FALSE(writeRet.isOk());
+}
+
+/*
+ * Reading from an invalid slot fails rather than incorrect key
+ */
+TEST_P(WeaverTest, ReadingFromInvalidSlotFails) {
+    if (config_.slots == std::numeric_limits<uint32_t>::max()) {
+        // If there are no invalid slots then pass
+        return;
+    }
+
+    WeaverReadResponse response;
+    const auto readRet = weaver_->read(config_.slots, KEY, &response);
+    ASSERT_TRUE(readRet.isOk());
+    EXPECT_TRUE(response.value.empty());
+    EXPECT_EQ(response.timeout, 0u);
+    EXPECT_EQ(response.status, WeaverReadStatus::FAILED);
+}
+
+/*
+ * Writing a key that is too large fails
+ */
+TEST_P(WeaverTest, WriteWithTooLargeKeyFails) {
+    std::vector<uint8_t> bigKey(config_.keySize + 1);
+
+    const auto writeRet = weaver_->write(first_free_slot_, bigKey, VALUE);
+    ASSERT_FALSE(writeRet.isOk());
+}
+
+/*
+ * Writing a value that is too large fails
+ */
+TEST_P(WeaverTest, WriteWithTooLargeValueFails) {
+    std::vector<uint8_t> bigValue(config_.valueSize + 1);
+
+    const auto writeRet = weaver_->write(first_free_slot_, KEY, bigValue);
+    ASSERT_FALSE(writeRet.isOk());
+}
+
+/*
+ * Reading with a key that is too large fails
+ */
+TEST_P(WeaverTest, ReadWithTooLargeKeyFails) {
+    std::vector<uint8_t> bigKey(config_.keySize + 1);
+
+    WeaverReadResponse response;
+    const auto readRet = weaver_->read(first_free_slot_, bigKey, &response);
+    ASSERT_TRUE(readRet.isOk());
+    EXPECT_TRUE(response.value.empty());
+    EXPECT_EQ(response.timeout, 0u);
+    EXPECT_EQ(response.status, WeaverReadStatus::FAILED);
+}
+
+TEST_P(WeaverTest, WarmUpReturnsSuccess) {
+    if (interface_version_ < 3) {
+        GTEST_SKIP() << "Test case requires Weaver v3 or later";
+    }
+    // warmUp() is just a hint, and it should always succeed.
+    auto ret = weaver_->warmUp();
+    EXPECT_TRUE(ret.isOk());
+}
+
+TEST_P(WeaverTest, RepeatedWarmUps) {
+    if (interface_version_ < 3) {
+        GTEST_SKIP() << "Test case requires Weaver v3 or later";
+    }
+    // warmUp() is just a hint, and it should always succeed.
+    for (int i = 0; i < 50; i++) {
+        const auto ret = weaver_->warmUp();
+        ASSERT_TRUE(ret.isOk());
+    }
+}
+
+TEST_P(WeaverTest, WriteAndReadAfterWarmUp) {
+    const uint32_t slotId = first_free_slot_;
+
+    if (interface_version_ < 3) {
+        GTEST_SKIP() << "Test case requires Weaver v3 or later";
+    }
+
+    {
+        const auto ret = weaver_->warmUp();
+        EXPECT_TRUE(ret.isOk());
+    }
+
+    {
+        const auto ret = weaver_->write(slotId, KEY, VALUE);
+        EXPECT_TRUE(ret.isOk());
+    }
+
+    {
+        WeaverReadResponse response;
+        const auto ret = weaver_->read(slotId, KEY, &response);
+        ASSERT_TRUE(ret.isOk());
+        EXPECT_EQ(response.status, WeaverReadStatus::OK);
+        EXPECT_EQ(response.value, VALUE);
+    }
+}
+
+// Test IWeaver#getTimeout().
+TEST_P(WeaverTest, GetTimeout) {
+    const uint32_t slotId = first_free_slot_;
+    constexpr int kMaxReads = 10;
+    int i;
+
+    if (interface_version_ < 3) {
+        GTEST_SKIP() << "Test case requires Weaver v3 or later";
+    }
+
+    // Write to a Weaver slot.
+    {
+        const auto ret = weaver_->write(slotId, KEY, VALUE);
+        EXPECT_TRUE(ret.isOk());
+    }
+
+    // Get the timeout from the slot.  This should either successfully retrieve a timeout of 0, or
+    // it should fail with EX_UNSUPPORTED_OPERATION in which case the rest of the test case is
+    // skipped.
+    {
+        int64_t timeout = -1;
+        const auto ret = weaver_->getTimeout(slotId, &timeout);
+        if (!ret.isOk()) {
+            ASSERT_EQ(ret.getExceptionCode(), EX_UNSUPPORTED_OPERATION);
+            GTEST_SKIP() << "getTimeout() is unsupported";
+        }
+        EXPECT_EQ(timeout, 0);
+    }
+
+    // Read from the slot using unique wrong keys until reaching the first nonzero timeout.
+    WeaverReadResponse response;
+    auto wrong_key = WRONG_KEY;
+    for (i = 0; i < kMaxReads; i++) {
+        wrong_key[0] = i;
+        const auto ret = weaver_->read(slotId, wrong_key, &response);
+        EXPECT_TRUE(ret.isOk());
+        EXPECT_TRUE(response.value.empty());
+        EXPECT_TRUE(response.status == WeaverReadStatus::INCORRECT_KEY ||
+                    response.status == WeaverReadStatus::THROTTLE);
+        if (response.timeout != 0) break;
+    }
+    EXPECT_LT(i, kMaxReads) << "Rate-limiter never kicked in";
+
+    // Verify that getTimeout() now returns something reasonable: nonzero, and no more than what
+    // read() reported.  We cannot check for exact equality, as the two calls occur at different
+    // times.  But the entire timeout certainly shouldn't have elapsed already.
+    int64_t timeout1 = 0;
+    {
+        const auto ret = weaver_->getTimeout(slotId, &timeout1);
+        EXPECT_TRUE(ret.isOk());
+        EXPECT_NE(timeout1, 0) << "getTimeout() returned zero timeout when nonzero was expected";
+        EXPECT_LE(timeout1, response.timeout)
+                << "getTimeout() returned longer timeout than expected";
+    }
+
+    // Sleep for a second and verify that the timeout has decreased by approximately one second.
+    // Again, it can't be an exact check.  We verify 900ms <= elapsed <= 5000ms, giving more
+    // leniency on the upper bound than the lower bound.
+    sleep(1);
+    int64_t timeout2 = 0;
+    {
+        const auto ret = weaver_->getTimeout(slotId, &timeout2);
+        EXPECT_TRUE(ret.isOk());
+        EXPECT_NE(timeout2, 0);
+        int64_t elapsed = timeout1 - timeout2;
+        EXPECT_GE(elapsed, 900);
+        EXPECT_LE(elapsed, 5000);
+    }
+
+    // Clean up with a write() to reset the timeout.
+    {
+        const auto ret = weaver_->write(slotId, KEY, VALUE);
+        EXPECT_TRUE(ret.isOk());
+    }
+    {
+        int64_t timeout = -1;
+        const auto ret = weaver_->getTimeout(slotId, &timeout);
+        EXPECT_TRUE(ret.isOk());
+        EXPECT_EQ(timeout, 0) << "getTimeout() returned nonzero timeout when zero was expected";
+    }
+}
+
+// If getTimeout() is passed an invalid slot ID, it should fail with EX_ILLEGAL_ARGUMENT.
+// EX_UNSUPPORTED_OPERATION is also okay, if getTimeout() is not supported at all.
+TEST_P(WeaverTest, GetTimeoutOnInvalidSlotFails) {
+    if (interface_version_ < 3) {
+        GTEST_SKIP() << "Test case requires Weaver v3 or later";
+    }
+    int64_t timeout = -1;
+    const auto ret = weaver_->getTimeout(config_.slots, &timeout);
+    ASSERT_FALSE(ret.isOk());
+    if (ret.getExceptionCode() == EX_UNSUPPORTED_OPERATION) {
+        const auto ret = weaver_->getTimeout(first_free_slot_, &timeout);
+        ASSERT_EQ(EX_UNSUPPORTED_OPERATION, ret.getExceptionCode());
+        GTEST_SKIP() << "getTimeout() is unsupported";
+    }
+    ASSERT_EQ(EX_ILLEGAL_ARGUMENT, ret.getExceptionCode());
+    ASSERT_EQ(-1, timeout);
+}
+
+// VSR-3.10-026: CHIPSETs that set ro.board.first_api_level or ro.board.api_level to 202604 or
+// higher: For any unique failed primary authentication attempt, if subsequent attempts are
+// permitted, are STRONGLY RECOMMENDED to enforce a minimum time interval as specified in the
+// following table:
+//
+//      Number of unique failed attempts    Minimum timeout
+//      --------------------------------    ---------------
+//      0-4                                 none
+//      5                                   1 minute
+//      6                                   5 minutes
+//      ...                                 [continues with exponentially increasing timeouts]
+//
+// Unfortunately, verifying the entire timeout table in VTS is impractical, since it would take far
+// too long. Therefore, this test case just tests the 1 minute timeout. This is still sufficient to
+// differentiate between the old and recommended timeout tables, since the old one had only a 30
+// second timeout after 5 failures.
+TEST_P(WeaverTest, TimeoutIsAtLeastOneMinuteAfterAtMostFiveAttempts) {
+    const uint32_t slotId = first_free_slot_;
+    constexpr auto min_timeout_after_5_failures = std::chrono::minutes(1);
+
+    // Determine whether the version prerequisite is met. However, for now just continue with the
+    // test regardless, since the test is currently non-enforcing.
+    const int board_first_api_level = android::base::GetIntProperty("ro.board.first_api_level", -1);
+    const int board_api_level = android::base::GetIntProperty("ro.board.api_level", -1);
+    const bool version_req_met = std::max(board_first_api_level, board_api_level) >= 202604;
+    GTEST_LOG_(INFO) << "board_first_api_level=" << board_first_api_level
+                     << ", board_api_level=" << board_api_level
+                     << ", version_req_met=" << version_req_met;
+
+    // Write to a Weaver slot.
+    {
+        const auto ret = weaver_->write(slotId, KEY, VALUE);
+        ASSERT_TRUE(ret.isOk());
+    }
+
+    // Read from the slot using up to five unique wrong keys, stopping when either all five keys
+    // have been attempted or when the HAL reports that there is a timeout of at least
+    // min_timeout_after_5_failures. Collect the last_attempt_time and reported_timeout from the
+    // last attempt before the loop stops.
+    std::chrono::steady_clock::time_point last_attempt_time;
+    std::chrono::milliseconds reported_timeout;
+    int attempts_made = 0;
+    do {
+        attempts_made++;
+        auto wrong_key = WRONG_KEY;
+        wrong_key[0] = attempts_made;
+        GTEST_LOG_(INFO) << "Read attempt #" << attempts_made << " with unique wrong key";
+
+        // To avoid flakes, collect last_attempt_time just *before* the read.
+        last_attempt_time = std::chrono::steady_clock::now();
+
+        WeaverReadResponse response;
+        const auto ret = weaver_->read(slotId, wrong_key, &response);
+
+        ASSERT_TRUE(ret.isOk());
+        ASSERT_TRUE(response.value.empty());
+        ASSERT_TRUE(response.status == WeaverReadStatus::INCORRECT_KEY ||
+                    response.status == WeaverReadStatus::THROTTLE);
+        ASSERT_GE(response.timeout, 0);  // Negative timeouts aren't allowed.
+        reported_timeout = std::chrono::milliseconds(response.timeout);
+
+        if (attempts_made < 5 && reported_timeout.count() != 0) {
+            // While the recommended policy has no timeout after the first four failures,
+            // technically it's allowed to have a stronger policy that imposes a timeout earlier.
+            // In such a case, check whether the reported timeout is at least 1 minute. If it is,
+            // then consider it too long to skip over in this loop and just continue to the part of
+            // the test where we verify that the timeout is really enforced and not just reported.
+            // If it's not, just wait for the timeout and keep going.
+            GTEST_LOG_(INFO) << "Got timeout of " << reported_timeout << " after " << attempts_made
+                             << " failures, which is stronger than the recommended policy";
+            if (reported_timeout >= min_timeout_after_5_failures) {
+                GTEST_LOG_(INFO) << "Breaking the loop before reaching 5 failures";
+                break;
+            }
+            GTEST_LOG_(INFO) << "Waiting for the timeout to expire";
+            std::this_thread::sleep_for(reported_timeout + std::chrono::seconds(1));
+        }
+    } while (attempts_made < 5);
+    GTEST_LOG_(INFO) << "Reported timeout: " << reported_timeout;
+    // Verify that the reported timeout is at least the minimum expected, with a bit of slack to
+    // account for the time the test has been running.
+    if (reported_timeout < min_timeout_after_5_failures - std::chrono::seconds(1)) {
+        // TODO: upgrade to failure (conditional on the appropriate version prerequisite being
+        // met) when the requirement is upgraded to MUST.
+        GTEST_SKIP() << "Reported timeout after " << attempts_made << " attempts is "
+                     << reported_timeout << ", but expected at least "
+                     << min_timeout_after_5_failures;
+    }
+
+    // Now verify that reads fail with WeaverReadStatus::THROTTLE for at least the reported timeout.
+    // However, to keep the test from taking too long on implementations that use a timeout longer
+    // than the recommended one (which is not expected, but is technically allowed), stop the test
+    // after min_timeout_after_5_failures rather than reported_timeout.
+    GTEST_LOG_(INFO) << "Verifying that the timeout is actually enforced";
+    std::chrono::steady_clock::duration time_elapsed;
+    do {
+        WeaverReadResponse response;
+        const auto ret = weaver_->read(slotId, KEY, &response);
+
+        // To avoid flakes, calculate time_elapsed just *after* the read.
+        time_elapsed = std::chrono::steady_clock::now() - last_attempt_time;
+
+        GTEST_LOG_(INFO) << "Read with correct key, time_elapsed=" << time_elapsed;
+        ASSERT_TRUE(ret.isOk());
+
+        if (response.status == WeaverReadStatus::OK) {
+            // A 5% tolerance is used here, to accommodate secure elements whose clock runs slightly
+            // faster than the application processor's clock. It is expected that when the two
+            // clocks are independent, implementers may have trouble keeping them in sync and will
+            // need to error on the side of making the secure element's clock slightly too fast. (If
+            // it was too slow instead, HAL users would see unexpected failures.)
+            //
+            // Note that no extra slack time is needed to account for execution time, seeing as
+            // time_elapsed is an overestimate. It measures the time from a point just *before* the
+            // last failed read to a point just *after* the successful read. Meanwhile,
+            // reported_timeout should be either the true timeout or slightly less than it.
+            if (time_elapsed >= reported_timeout * 95 / 100) {
+                GTEST_LOG_(INFO) << "Read succeeded in " << time_elapsed
+                                 << ". Timeout was enforced.";
+                return;
+            }
+            // TODO: upgrade to failure (conditional on the appropriate version prerequisite being
+            // met) when the requirement is upgraded to MUST.
+            GTEST_SKIP() << "Read succeeded in " << time_elapsed << ", which is too soon!";
+        }
+
+        // Read failed. It should be due to the timeout still being active.
+        ASSERT_TRUE(response.value.empty());
+        ASSERT_EQ(response.status, WeaverReadStatus::THROTTLE);
+        ASSERT_GT(response.timeout, 0);
+
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    } while (time_elapsed < min_timeout_after_5_failures);
+    GTEST_LOG_(INFO) << "Timeout was enforced for at least " << min_timeout_after_5_failures;
+}
+
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(WeaverTest);
+
+// Instantiate the test for each HIDL Weaver service.
+INSTANTIATE_TEST_SUITE_P(
+        PerHidlInstance, WeaverTest,
+        testing::Combine(testing::Values("hidl"),
+                         testing::ValuesIn(android::hardware::getAllHalInstanceNames(
+                                 HidlIWeaver::descriptor))),
+        [](const testing::TestParamInfo<std::tuple<std::string, std::string>>& info) {
+            return android::hardware::PrintInstanceNameToString(
+                    testing::TestParamInfo<std::string>{std::get<1>(info.param), info.index});
+        });
+
+// Instantiate the test for each AIDL Weaver service.
+INSTANTIATE_TEST_SUITE_P(
+        PerAidlInstance, WeaverTest,
+        testing::Combine(testing::Values("aidl"),
+                         testing::ValuesIn(android::getAidlHalInstanceNames(IWeaver::descriptor))),
+        [](const testing::TestParamInfo<std::tuple<std::string, std::string>>& info) {
+            // This name_generator makes the instance name be included in the test case names, e.g.
+            // "PerAidlInstance/WeaverTest#GetConfig/0_android_hardware_weaver_IWeaver_default"
+            // instead of "PerAidlInstance/WeaverTest#GetConfig/0".
+            return android::PrintInstanceNameToString(
+                    testing::TestParamInfo<std::string>{std::get<1>(info.param), info.index});
+        });
+
+int main(int argc, char** argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    ABinderProcess_setThreadPoolMaxThreadCount(1);
+    ABinderProcess_startThreadPool();
+    return RUN_ALL_TESTS();
+}

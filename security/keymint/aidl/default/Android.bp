@@ -1,0 +1,251 @@
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "hardware_interfaces_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["hardware_interfaces_license"],
+}
+
+vintf_fragment {
+    name: "android.hardware.security.keymint-service.xml",
+    src: "android.hardware.security.keymint-service.xml",
+    vendor: true,
+}
+
+vintf_fragment {
+    name: "android.hardware.security.sharedsecret-service.xml",
+    src: "android.hardware.security.sharedsecret-service.xml",
+    vendor: true,
+}
+
+vintf_fragment {
+    name: "android.hardware.security.secureclock-service.xml",
+    src: "android.hardware.security.secureclock-service.xml",
+    vendor: true,
+}
+
+// The following target has an insecure implementation of KeyMint where the
+// trusted application (TA) code runs in-process alongside the HAL service
+// code.
+//
+// A real device is required to run the TA code in a secure environment, as
+// per CDD 9.11 [C-1-1]: "MUST back up the keystore implementation with an
+// isolated execution environment."
+//
+// This C++ reference implementation will not be updated to support versions
+// of the KeyMint HAL beyond version 4. Use the Rust reference implementation
+// for versions 5 and later.
+cc_binary {
+    name: "android.hardware.security.keymint-service",
+    relative_install_path: "hw",
+    init_rc: ["android.hardware.security.keymint-service.rc"],
+    vendor: true,
+    cflags: [
+        "-Wall",
+        "-Wextra",
+    ],
+    defaults: [
+        "keymint_cpp_impl_hal_aidl_ndk_shared",
+    ],
+    shared_libs: [
+        "android.hardware.security.rkp-V3-ndk",
+        "android.hardware.security.sharedsecret-V1-ndk",
+        "android.hardware.security.secureclock-V1-ndk",
+        "libbase",
+        "libbinder_ndk",
+        "libcppbor",
+        "libcrypto",
+        "libkeymaster_portable",
+        "libkeymint",
+        "liblog",
+        "libpuresoftkeymasterdevice",
+        "libutils",
+    ],
+    srcs: [
+        "service.cpp",
+    ],
+    required: [
+        "android.hardware.hardware_keystore_V4.xml",
+    ],
+    vintf_fragment_modules: [
+        "android.hardware.security.keymint-service.xml",
+        "android.hardware.security.sharedsecret-service.xml",
+        "android.hardware.security.secureclock-service.xml",
+    ],
+}
+
+// The following target has an insecure implementation of KeyMint where the
+// trusted application (TA) code runs in-process alongside the HAL service
+// code.
+//
+// A real device is required to run the TA code in a secure environment, as
+// per CDD 9.11 [C-1-1]: "MUST back up the keystore implementation with an
+// isolated execution environment."
+rust_binary {
+    name: "android.hardware.security.keymint-service.nonsecure",
+    relative_install_path: "hw",
+    vendor: true,
+    init_rc: ["android.hardware.security.keymint-service.nonsecure.rc"],
+    defaults: [
+        "keymint_use_latest_hal_aidl_rust",
+    ],
+    srcs: [
+        "main.rs",
+    ],
+    prefer_rlib: true,
+    rustlibs: [
+        "libandroid_logger",
+        "libbinder_rs",
+        "liblog_rust",
+        "libkmr_hal",
+        "libkmr_hal_nonsecure",
+        "libkmr_ta_nonsecure",
+    ],
+    vintf_fragment_modules: [
+        "android.hardware.security.keymint-service.xml",
+        "android.hardware.security.sharedsecret-service.xml",
+        "android.hardware.security.secureclock-service.xml",
+    ],
+}
+
+// The following target declares the latest version of KeyMint.
+prebuilt_etc {
+    name: "android.hardware.hardware_keystore.xml",
+    sub_dir: "permissions",
+    vendor: true,
+    src: "android.hardware.hardware_keystore.xml",
+}
+
+// The following targets (and underlying XML files) declare specific
+// versions of KeyMint.  Vendors should use the version that matches the
+// version of the KeyMint HAL that the device implements.
+
+prebuilt_etc {
+    name: "android.hardware.hardware_keystore_V1.xml",
+    sub_dir: "permissions",
+    vendor: true,
+    src: "android.hardware.hardware_keystore_V1.xml",
+}
+
+prebuilt_etc {
+    name: "android.hardware.hardware_keystore_V2.xml",
+    sub_dir: "permissions",
+    vendor: true,
+    src: "android.hardware.hardware_keystore_V2.xml",
+}
+
+prebuilt_etc {
+    name: "android.hardware.hardware_keystore_V3.xml",
+    sub_dir: "permissions",
+    vendor: true,
+    src: "android.hardware.hardware_keystore_V3.xml",
+}
+
+prebuilt_etc {
+    name: "android.hardware.hardware_keystore_V4.xml",
+    sub_dir: "permissions",
+    vendor: true,
+    src: "android.hardware.hardware_keystore_V4.xml",
+}
+
+prebuilt_etc {
+    name: "android.hardware.hardware_keystore_V5.xml",
+    sub_dir: "permissions",
+    vendor: true,
+    src: "android.hardware.hardware_keystore_V5.xml",
+}
+
+// The following library includes helper code for the KeyMint HAL that is only appropriate to use
+// in a non-secure environment (e.g. an emulator such as Cuttlefish).
+rust_library {
+    name: "libkmr_hal_nonsecure",
+    crate_name: "kmr_hal_nonsecure",
+    vendor_available: true,
+    lints: "android",
+    clippy_lints: "android",
+    rustlibs: [
+        "libbinder_rs",
+        "libhex",
+        "liblibc",
+        "liblog_rust",
+        "libkmr_hal",
+        "libkmr_wire",
+    ],
+    srcs: ["hal/lib.rs"],
+    // Limit visibility because this is a nonsecure library that should only be used in
+    // specific contexts (e.g. emulators such as Cuttlefish).
+    visibility: [
+        "//visibility:override",
+        // The following emulator targets can legitimately use nonsecure code.
+        "//device/google/cuttlefish/guest/hals/keymint/rust",
+        "//system/software_defined_vehicle/platform/third_party/sdv_keymint_nonsecure",
+        // TODO(b/477580755): remove the following use of nonsecure HAL code once the
+        // `keymint_rot_nonsecure` flag has been removed.
+        "//system/core/trusty/keymint",
+        // TODO(b/455661648): remove the following uses of nonsecure HAL code once RoT
+        // info is passed securely.
+        "//system/desktop/security/keymint_strongbox",
+        "//system/desktop/security/update-boot-info",
+    ],
+}
+
+// The following library includes helper code for the KeyMint TA that is only appropriate to use
+// in a non-secure environment (e.g. an emulator such as Cuttlefish).
+rust_library {
+    name: "libkmr_ta_nonsecure",
+    crate_name: "kmr_ta_nonsecure",
+    vendor_available: true,
+    host_supported: true,
+    lints: "android",
+    clippy_lints: "android",
+    rustlibs: [
+        "libhex",
+        "liblibc",
+        "liblog_rust",
+        "libkmr_common",
+        "libkmr_crypto_boring",
+        "libkmr_ta",
+        "libkmr_wire",
+    ],
+    srcs: ["ta/lib.rs"],
+    // Limit visibility because this is a nonsecure library that should only be used in
+    // specific contexts (e.g. emulators such as Cuttlefish).
+    visibility: [
+        "//visibility:override",
+        // The following emulator targets can legitimately use nonsecure code.
+        "//device/google/cuttlefish/host/commands/secure_env/rust",
+        "//system/software_defined_vehicle/platform/third_party/sdv_keymint_nonsecure",
+    ],
+}
+
+apex {
+    name: "com.android.hardware.keymint.rust_nonsecure",
+    manifest: "manifest.json",
+    file_contexts: "file_contexts",
+    key: "com.google.cf.apex.key",
+    certificate: ":com.android.hardware.certificate",
+    soc_specific: true,
+    updatable: false,
+    binaries: [
+        "android.hardware.security.keymint-service.nonsecure",
+    ],
+    prebuilts: [
+        "keymint_aidl_nonsecure_init_rc",
+        "android.hardware.hardware_keystore.xml", // permissions
+    ],
+}
+
+prebuilt_etc {
+    name: "keymint_aidl_nonsecure_init_rc",
+    filename_from_src: true,
+    vendor: true,
+    src: ":gen-keymint_aidl_nonsecure_init_rc",
+}
+
+genrule {
+    name: "gen-keymint_aidl_nonsecure_init_rc",
+    srcs: ["android.hardware.security.keymint-service.nonsecure.rc"],
+    out: ["android.hardware.security.keymint-service.nonsecure.apex.rc"],
+    cmd: "sed -E 's%/vendor/bin/%/apex/com.android.hardware.keymint/bin/%' $(in) > $(out)",
+}

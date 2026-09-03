@@ -1,0 +1,228 @@
+/*
+ * Copyright 2025 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#define LOG_TAG "bluetooth_hal.bqr"
+
+#include "bluetooth_hal/bqr/bqr_handler.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <unordered_map>
+
+#include "android-base/logging.h"
+#include "bluetooth_hal/bqr/bqr_advance_rf_stats_event.h"
+#include "bluetooth_hal/bqr/bqr_advance_rf_stats_event_v7.h"
+#include "bluetooth_hal/bqr/bqr_energy_monitoring_event.h"
+#include "bluetooth_hal/bqr/bqr_energy_monitoring_event_v6.h"
+#include "bluetooth_hal/bqr/bqr_energy_monitoring_event_v7.h"
+#include "bluetooth_hal/bqr/bqr_event.h"
+#include "bluetooth_hal/bqr/bqr_link_quality_event_v1_to_v3.h"
+#include "bluetooth_hal/bqr/bqr_link_quality_event_v4.h"
+#include "bluetooth_hal/bqr/bqr_link_quality_event_v5.h"
+#include "bluetooth_hal/bqr/bqr_link_quality_event_v6.h"
+#include "bluetooth_hal/bqr/bqr_link_quality_event_v7.h"
+#include "bluetooth_hal/bqr/bqr_root_inflammation_event.h"
+#include "bluetooth_hal/debug/debug_central.h"
+#include "bluetooth_hal/hal_packet.h"
+#include "bluetooth_hal/hal_types.h"
+#include "bluetooth_hal/hci_monitor.h"
+
+namespace bluetooth_hal::bqr {
+namespace {
+
+using ::bluetooth_hal::debug::DebugCentral;
+using ::bluetooth_hal::hci::CommandOpCode;
+using ::bluetooth_hal::hci::EventResultCode;
+using ::bluetooth_hal::hci::HalPacket;
+using ::bluetooth_hal::hci::HciCommandCompleteEventMonitor;
+using ::bluetooth_hal::hci::MonitorMode;
+
+constexpr size_t kVendorCapabilityVersionOffset = 14;
+const std::unordered_map<uint16_t, BqrVersion> kVersionToBqrMap = {
+        {0x0001, BqrVersion::kV1ToV3}, {0x0101, BqrVersion::kV1ToV3}, {0x0201, BqrVersion::kV4},
+        {0x0301, BqrVersion::kV5},     {0x0401, BqrVersion::kV6},     {0x0501, BqrVersion::kV7},
+};
+
+}  // namespace
+
+std::unique_ptr<BqrHandler> BqrHandler::handler_ptr_;
+
+BqrHandler::BqrHandler()
+    : local_supported_bqr_version_(BqrVersion::kNone),
+      vendor_capability_monitor_(HciCommandCompleteEventMonitor(
+              static_cast<uint16_t>(CommandOpCode::kGoogleVendorCapability))) {}
+
+bool BqrHandler::RegisterBqrHandler(FactoryFn factory) {
+    if (!factory) {
+        return false;
+    }
+    VendorFactory::RegisterProviderFactory(std::move(factory));
+    return true;
+}
+
+void BqrHandler::Start() {
+    if (handler_ptr_ == nullptr) {
+        handler_ptr_ = VendorFactory::Create();
+    }
+}
+
+void BqrHandler::Stop() {
+    handler_ptr_.reset();
+}
+
+void BqrHandler::OnMonitorPacketCallback([[maybe_unused]] MonitorMode mode,
+                                         const HalPacket& packet) {
+    if (local_supported_bqr_version_ == BqrVersion::kNone) {
+        if (packet.GetCommandCompleteEventResult() ==
+                    static_cast<uint8_t>(EventResultCode::kSuccess) &&
+            packet.GetCommandOpcodeFromGeneratedEvent() ==
+                    static_cast<uint16_t>(CommandOpCode::kGoogleVendorCapability)) {
+            HandleVendorCapabilityEvent(packet);
+        }
+        return;
+    }
+
+    BqrEvent bqr_event(packet);
+    if (bqr_event.IsValid()) {
+        auto bqr_event_type = bqr_event.GetBqrEventType();
+        switch (bqr_event_type) {
+            case BqrEventType::kRootInflammation:
+                HandleRootInflammationEvent(bqr_event);
+                break;
+            case BqrEventType::kLinkQuality:
+                HandleLinkQualityEvent(bqr_event);
+                break;
+            case BqrEventType::kAdvancedRfStat:
+                HandleAdvancedRfStatEvent(bqr_event);
+                break;
+            case BqrEventType::kEnergyMonitoring:
+                HandleEnergyMonitoringEvent(bqr_event);
+                break;
+            default:
+                HandleUnspecifiedVendorEvent(bqr_event);
+                break;
+        }
+    }
+}
+
+void BqrHandler::HandleVendorCapabilityEvent(const HalPacket& packet) {
+    if (packet.size() < kVendorCapabilityVersionOffset + sizeof(uint16_t)) {
+        return;
+    }
+    uint16_t version = packet.AtUint16LittleEndian(kVendorCapabilityVersionOffset);
+    auto it = kVersionToBqrMap.find(version);
+    if (it != kVersionToBqrMap.end()) {
+        local_supported_bqr_version_ = it->second;
+        LOG(INFO) << "BQR supported version is " << static_cast<int>(local_supported_bqr_version_);
+    } else {
+        local_supported_bqr_version_ = BqrVersion::kNone;
+        LOG(WARNING) << "Unknown BQR version from vendor capability: 0x" << std::hex << version;
+    }
+}
+
+void BqrHandler::HandleRootInflammationEvent(const BqrEvent& bqr_event) {
+    BqrRootInflammationEvent root_inflammation(bqr_event);
+    if (!root_inflammation.IsValid()) {
+        return;
+    }
+    LOG(ERROR) << "Received a root inflammation event! " << bqr_event.ToString();
+    DebugCentral::Get().HandleRootInflammationEvent(root_inflammation);
+}
+
+void BqrHandler::HandleLinkQualityEvent(const BqrEvent& bqr_event) {
+    switch (local_supported_bqr_version_) {
+        case BqrVersion::kV1ToV3: {
+            BqrLinkQualityEventV1ToV3 link_quality_event(bqr_event);
+            LOG(INFO) << link_quality_event.ToString();
+        } break;
+        case BqrVersion::kV4: {
+            BqrLinkQualityEventV4 link_quality_event(bqr_event);
+            LOG(INFO) << link_quality_event.ToString();
+        } break;
+        case BqrVersion::kV5: {
+            BqrLinkQualityEventV5 link_quality_event(bqr_event);
+            LOG(INFO) << link_quality_event.ToString();
+        } break;
+        case BqrVersion::kV6: {
+            BqrLinkQualityEventV6 link_quality_event(bqr_event);
+            LOG(INFO) << link_quality_event.ToString();
+        } break;
+        case BqrVersion::kV7: {
+            BqrLinkQualityEventV7 link_quality_event(bqr_event);
+            LOG(INFO) << link_quality_event.ToString();
+        } break;
+        default:
+            break;
+    }
+}
+
+void BqrHandler::HandleAdvancedRfStatEvent(const BqrEvent& bqr_event) {
+    switch (local_supported_bqr_version_) {
+        case BqrVersion::kV6: {
+            BqrAdvanceRfStatsEvent advance_rf_states_event(bqr_event);
+            LOG(INFO) << advance_rf_states_event.ToString();
+        } break;
+        case BqrVersion::kV7: {
+            BqrAdvanceRfStatsEventV7 advance_rf_states_event(bqr_event);
+            LOG(INFO) << advance_rf_states_event.ToString();
+        } break;
+        default:
+            break;
+    }
+}
+
+void BqrHandler::HandleEnergyMonitoringEvent(const BqrEvent& bqr_event) {
+    switch (local_supported_bqr_version_) {
+        case BqrVersion::kV1ToV3:
+        case BqrVersion::kV4:
+        case BqrVersion::kV5: {
+            BqrEnergyMonitoringEvent energy_event(bqr_event);
+            LOG(INFO) << energy_event.ToString();
+        } break;
+        case BqrVersion::kV6: {
+            BqrEnergyMonitoringEventV6 energy_event(bqr_event);
+            LOG(INFO) << energy_event.ToString();
+        } break;
+        case BqrVersion::kV7: {
+            BqrEnergyMonitoringEventV7 energy_event(bqr_event);
+            LOG(INFO) << energy_event.ToString();
+        } break;
+        default:
+            break;
+    }
+}
+
+void BqrHandler::HandleUnspecifiedVendorEvent([[maybe_unused]] const BqrEvent& bqr_event) {
+    // Empty function can be overridden by child classes if needed.
+}
+
+BqrVersion BqrHandler::GetLocalSupportedBqrVersion() {
+    return local_supported_bqr_version_;
+}
+
+void BqrHandler::OnBluetoothEnabled() {
+    RegisterMonitor(bqr_event_monitor_, MonitorMode::kMonitor);
+    RegisterMonitor(vendor_capability_monitor_, MonitorMode::kMonitor);
+}
+
+void BqrHandler::OnBluetoothDisabled() {
+    local_supported_bqr_version_ = BqrVersion::kNone;
+    UnregisterMonitor(bqr_event_monitor_);
+    UnregisterMonitor(vendor_capability_monitor_);
+}
+
+}  // namespace bluetooth_hal::bqr

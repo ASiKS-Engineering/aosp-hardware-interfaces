@@ -1,0 +1,30 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+cc_binary {
+    name: "android.hardware.bluetooth.socket-service.default",
+    relative_install_path: "hw",
+    init_rc: ["bluetooth-socket-service-default.rc"],
+    vintf_fragments: [":manifest_android.hardware.bluetooth.socket-service.default.xml"],
+    vendor: true,
+    srcs: [
+        "service.cpp",
+    ],
+    shared_libs: [
+        "android.hardware.bluetooth.socket-V2-ndk",
+        "libbase",
+        "libbinder_ndk",
+        "libhidlbase",
+        "libutils",
+        "liblog",
+    ],
+    static_libs: [
+        "android.hardware.bluetooth.socket-V2-impl",
+    ],
+}
+
+filegroup {
+    name: "manifest_android.hardware.bluetooth.socket-service.default.xml",
+    srcs: ["bluetooth-socket-service-default.xml"],
+}

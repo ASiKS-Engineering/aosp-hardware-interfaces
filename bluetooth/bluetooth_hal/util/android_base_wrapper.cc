@@ -1,0 +1,51 @@
+/*
+ * Copyright 2024 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "bluetooth_hal/util/android_base_wrapper.h"
+
+#include <string>
+#include <string_view>
+
+#include "android-base/parseint.h"
+#include "android-base/properties.h"
+
+namespace bluetooth_hal::util {
+
+class AndroidBaseWrapperImpl : public AndroidBaseWrapper {
+  public:
+    std::string GetProperty(std::string_view key, std::string_view default_value) override {
+        return ::android::base::GetProperty(std::string(key), std::string(default_value));
+    }
+
+    bool GetBoolProperty(std::string_view key, bool default_value) override {
+        return ::android::base::GetBoolProperty(std::string(key), default_value);
+    }
+
+    bool SetProperty(std::string_view key, std::string_view value) override {
+        return ::android::base::SetProperty(std::string(key), std::string(value));
+    }
+
+    bool ParseUint(std::string_view s, uint8_t* out, uint8_t max) override {
+        return ::android::base::ParseUint<uint8_t>(std::string(s), out, max);
+    }
+};
+
+AndroidBaseWrapper& AndroidBaseWrapper::GetWrapper() {
+    static AndroidBaseWrapperImpl wrapper;
+    return wrapper;
+}
+
+}  // namespace bluetooth_hal::util

@@ -1,0 +1,53 @@
+/*
+ * Copyright 2024 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "bluetooth_hal/extensions/cs/bluetooth_channel_sounding_distance_estimator.h"
+
+#include <any>
+
+#include "aidl/android/hardware/bluetooth/ranging/ChannelSoudingRawData.h"
+
+namespace bluetooth_hal::extensions::cs {
+
+using ::aidl::android::hardware::bluetooth::ranging::ChannelSoudingRawData;
+using ::aidl::android::hardware::bluetooth::ranging::Config;
+using ::aidl::android::hardware::bluetooth::ranging::ProcedureEnableConfig;
+
+void ChannelSoundingDistanceEstimator::ResetVariables() {};
+
+double ChannelSoundingDistanceEstimator::EstimateDistanceImpl(const std::any& data) {
+    if (std::any_cast<ChannelSoudingRawData>(&data)) {
+        return 0;
+    }
+    return -1;
+}
+
+double ChannelSoundingDistanceEstimator::GetConfidenceLevel() {
+    return 0;
+}
+
+double ChannelSoundingDistanceEstimator::GetVelocity() {
+    return 0;
+}
+
+void ChannelSoundingDistanceEstimator::SetInlinePCT(bool /*is_enabled*/) {}
+
+void ChannelSoundingDistanceEstimator::UpdateChannelSoundingConfig(const Config& /*config*/) {}
+
+void ChannelSoundingDistanceEstimator::UpdateProcedureEnableConfig(
+        const ProcedureEnableConfig& /*config*/) {}
+
+}  // namespace bluetooth_hal::extensions::cs
