@@ -111,24 +111,35 @@ float NmeaFixInfo::getVerticalAccuracyMeters() const {
     return kMockVerticalAccuracyMeters;
 }
 
-int64_t NmeaFixInfo::nmeaPartsToTimestamp(const std::string& timeStr, const std::string& dateStr) {
-    /**
-     * In NMEA format, the full time can only get from the $GPRMC record, see
-     * the following example:
-     * $GPRMC,213204.00,A,3725.371240,N,12205.589239,W,000.0,000.0,290819,,,A*49
-     * the datetime is stored in two parts, 213204 and 290819, which means
-     * 2019/08/29 21:32:04, however for in unix the year starts from 1900, we
-     * need to add the offset.
-     */
-    struct tm tm;
-    const int32_t unixYearOffset = 100;
-    tm.tm_mday = std::stoi(dateStr.substr(0, 2).c_str());
-    tm.tm_mon = std::stoi(dateStr.substr(2, 2).c_str()) - 1;
-    tm.tm_year = std::stoi(dateStr.substr(4, 2).c_str()) + unixYearOffset;
-    tm.tm_hour = std::stoi(timeStr.substr(0, 2).c_str());
-    tm.tm_min = std::stoi(timeStr.substr(2, 2).c_str());
-    tm.tm_sec = std::stoi(timeStr.substr(4, 2).c_str());
-    return static_cast<int64_t>(mktime(&tm) - timezone);
+int64_t NmeaFixInfo::nmeaPartsToTimestamp(
+        const std::string& timeStr,
+        const std::string& dateStr) {
+
+    if (timeStr.size() < 6 || dateStr.size() < 6) {
+        ALOGW("Invalid NMEA date/time: time='%s' date='%s'",
+              timeStr.c_str(), dateStr.c_str());
+        return 0;
+    }
+
+    try {
+        struct tm tm = {};
+        const int32_t unixYearOffset = 100;
+
+        tm.tm_mday = std::stoi(dateStr.substr(0, 2));
+        tm.tm_mon = std::stoi(dateStr.substr(2, 2)) - 1;
+        tm.tm_year = std::stoi(dateStr.substr(4, 2)) + unixYearOffset;
+
+        tm.tm_hour = std::stoi(timeStr.substr(0, 2));
+        tm.tm_min = std::stoi(timeStr.substr(2, 2));
+        tm.tm_sec = std::stoi(timeStr.substr(4, 2));
+
+        return static_cast<int64_t>(mktime(&tm) - timezone);
+
+    } catch (const std::exception& e) {
+        ALOGW("Failed to parse NMEA date/time: time='%s' date='%s': %s",
+              timeStr.c_str(), dateStr.c_str(), e.what());
+        return 0;
+    }
 }
 
 bool NmeaFixInfo::isValidFix() const {
