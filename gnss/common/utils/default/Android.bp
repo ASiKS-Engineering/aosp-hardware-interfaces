@@ -32,6 +32,11 @@ cc_library_static {
         "-Wextra",
         "-Werror",
     ],
+
+    cppflags: [
+        "-fexceptions",
+    ],
+
     srcs: [
         "v2_1/GnssAntennaInfo.cpp",
         "v2_1/GnssConfiguration.cpp",
