@@ -136,28 +136,57 @@ bool NmeaFixInfo::isValidFix() const {
 }
 
 void NmeaFixInfo::parseGGALine(const std::vector<std::string>& sentenceValues) {
-    if (sentenceValues.size() == 0 || sentenceValues[0].compare(GPGA_RECORD_TAG) != 0) {
+    if (sentenceValues.size() < MIN_COL_NUM ||
+        sentenceValues[0].compare(GPGA_RECORD_TAG) != 0) {
         return;
     }
-    // LatDeg, need covert to degree, if it is 'N', should be negative value
-    this->latDeg = std::stof(sentenceValues[2].substr(0, 2)) +
-                   (std::stof(sentenceValues[2].substr(2)) / 60.0);
-    if (sentenceValues[3].compare("N") != 0) {
-        this->latDeg *= -1;
+
+    try {
+        const float latDegrees =
+                checkAndConvertToFloat(sentenceValues[2].substr(0, 2));
+        const float latMinutes =
+                checkAndConvertToFloat(sentenceValues[2].substr(2));
+
+        const float lngDegrees =
+                checkAndConvertToFloat(sentenceValues[4].substr(0, 3));
+        const float lngMinutes =
+                checkAndConvertToFloat(sentenceValues[4].substr(3));
+
+        const float altitude =
+                checkAndConvertToFloat(sentenceValues[9]);
+
+        const float hdop =
+                checkAndConvertToFloat(sentenceValues[8]);
+
+        if (!std::isfinite(latDegrees) ||
+            !std::isfinite(latMinutes) ||
+            !std::isfinite(lngDegrees) ||
+            !std::isfinite(lngMinutes) ||
+            !std::isfinite(altitude)) {
+            ALOGW("Invalid GGA numeric field, ignoring sentence");
+            return;
+        }
+
+        this->latDeg = latDegrees + latMinutes / 60.0f;
+
+        if (sentenceValues[3].compare("N") != 0) {
+            this->latDeg *= -1.0f;
+        }
+
+        this->lngDeg = lngDegrees + lngMinutes / 60.0f;
+
+        if (sentenceValues[5].compare("E") != 0) {
+            this->lngDeg *= -1.0f;
+        }
+
+        this->altitudeMeters = altitude;
+        this->hDop = hdop;
+
+        this->hasGGARecord = true;
+    } catch (const std::exception& e) {
+        ALOGW("Failed to parse GGA sentence: %s", e.what());
+        this->hasGGARecord = false;
     }
-
-    // LngDeg, need covert to degree, if it is 'E', should be negative value
-    this->lngDeg = std::stof(sentenceValues[4].substr(0, 3)) +
-                   std::stof(sentenceValues[4].substr(3)) / 60.0;
-    if (sentenceValues[5].compare("E") != 0) {
-        this->lngDeg *= -1;
-    }
-
-    this->altitudeMeters = std::stof(sentenceValues[9]);
-
-    this->hDop = sentenceValues[8].empty() ? std::numeric_limits<float>::quiet_NaN()
-                                           : std::stof(sentenceValues[8]);
-    this->hasGGARecord = true;
 }
 
 void NmeaFixInfo::parseRMCLine(const std::vector<std::string>& sentenceValues) {
