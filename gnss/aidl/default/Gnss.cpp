@@ -232,6 +232,7 @@ void Gnss::handleNmea(const std::string& nmea) {
           location->longitudeDegrees,
           location->altitudeMeters,
           location->speedMetersPerSec);
+          location->bearingDegrees);
 
     mFirstFixReceived = true;
     reportLocation(*location);
