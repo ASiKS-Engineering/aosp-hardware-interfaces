@@ -28,6 +28,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <cmath>
 
 namespace android {
 namespace hardware {
@@ -47,8 +48,28 @@ float NmeaFixInfo::checkAndConvertToFloat(const std::string& sentence) {
     if (sentence.empty()) {
         return std::numeric_limits<float>::quiet_NaN();
     }
-    ALOGD("NMEA stof input: '%s'", sentence.c_str());
-    return std::stof(sentence);
+
+    try {
+        size_t consumed = 0;
+        const float value = std::stof(sentence, &consumed);
+
+        // Reject partially parsed values, e.g. "123abc".
+        if (consumed != sentence.size()) {
+            ALOGW("Invalid NMEA float '%s'", sentence.c_str());
+            return std::numeric_limits<float>::quiet_NaN();
+        }
+
+        if (!std::isfinite(value)) {
+            ALOGW("Non-finite NMEA float '%s'", sentence.c_str());
+            return std::numeric_limits<float>::quiet_NaN();
+        }
+
+        return value;
+    } catch (const std::exception& e) {
+        ALOGW("Failed to parse NMEA float '%s': %s",
+              sentence.c_str(), e.what());
+        return std::numeric_limits<float>::quiet_NaN();
+    }
 }
 
 float NmeaFixInfo::getBearingAccuracyDegrees() const {
