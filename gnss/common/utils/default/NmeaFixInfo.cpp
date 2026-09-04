@@ -189,13 +189,52 @@ void NmeaFixInfo::parseGGALine(const std::vector<std::string>& sentenceValues) {
     }
 }
 
-void NmeaFixInfo::parseRMCLine(const std::vector<std::string>& sentenceValues) {
-    if (sentenceValues.size() == 0 || sentenceValues[0].compare(GPRMC_RECORD_TAG) != 0) {
+void NmeaFixInfo::parseRMCLine(
+        const std::vector<std::string>& sentenceValues) {
+    if (sentenceValues.size() < MIN_COL_NUM ||
+        sentenceValues[0].compare(GPRMC_RECORD_TAG) != 0) {
         return;
     }
-    this->speedMetersPerSec = checkAndConvertToFloat(sentenceValues[7]);
-    this->bearingDegrees = checkAndConvertToFloat(sentenceValues[8]);
-    this->timestamp = nmeaPartsToTimestamp(sentenceValues[1], sentenceValues[9]);
+
+    const float speedKnots =
+            checkAndConvertToFloat(sentenceValues[7]);
+
+    const float bearing =
+            checkAndConvertToFloat(sentenceValues[8]);
+
+    if (std::isfinite(speedKnots)) {
+        // NMEA speed is knots -> m/s.
+        this->speedMetersPerSec = speedKnots * 0.514444f;
+    } else {
+        this->speedMetersPerSec =
+                std::numeric_limits<float>::quiet_NaN();
+    }
+
+    if (std::isfinite(bearing) &&
+        bearing >= 0.0f &&
+        bearing < 360.0f) {
+        this->bearingDegrees = bearing;
+    } else {
+        if (std::isfinite(bearing)) {
+            ALOGW("Invalid NMEA bearing %.3f degrees; ignoring bearing",
+                  bearing);
+        } else {
+            ALOGW("Missing/invalid NMEA bearing; ignoring bearing");
+        }
+
+        this->bearingDegrees =
+                std::numeric_limits<float>::quiet_NaN();
+    }
+
+    try {
+        this->timestamp =
+                nmeaPartsToTimestamp(sentenceValues[1], sentenceValues[9]);
+    } catch (const std::exception& e) {
+        ALOGW("Invalid RMC timestamp: %s", e.what());
+        this->hasGMCRecord = false;
+        return;
+    }
+
     this->hasGMCRecord = true;
 }
 
