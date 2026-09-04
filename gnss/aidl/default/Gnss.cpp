@@ -227,12 +227,12 @@ void Gnss::handleNmea(const std::string& nmea) {
         return;
     }
 
-    ALOGD("GNSS fix: lat=%lf lon=%lf alt=%lf speed=%f",
-          location->latitudeDegrees,
-          location->longitudeDegrees,
-          location->altitudeMeters,
-          location->speedMetersPerSec,
-          location->bearingDegrees);
+ALOGD("GNSS fix: lat=%lf lon=%lf alt=%lf speed=%f bearing=%f",
+    location->latitudeDegrees,
+    location->longitudeDegrees,
+    location->altitudeMeters,
+    location->speedMetersPerSec,
+    location->bearingDegrees);
 
     mFirstFixReceived = true;
     reportLocation(*location);
