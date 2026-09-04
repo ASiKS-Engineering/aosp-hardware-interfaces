@@ -265,7 +265,24 @@ std::unique_ptr<V2_0::GnssLocation> NmeaFixInfo::getLocationFromInputStr(
         if (sentenceValues.size() < MIN_COL_NUM) {
             continue;
         }
-        double currentTimeStamp = std::stof(sentenceValues[1]);
+        double currentTimeStamp = 0.0;
+
+        try {
+            size_t consumed = 0;
+            currentTimeStamp = std::stod(sentenceValues[1], &consumed);
+        
+            if (consumed != sentenceValues[1].size() ||
+                !std::isfinite(currentTimeStamp)) {
+                ALOGW("Invalid NMEA timestamp '%s', ignoring sentence",
+                      sentenceValues[1].c_str());
+                continue;
+            }
+        } catch (const std::exception& e) {
+            ALOGW("Failed to parse NMEA timestamp '%s': %s",
+                  sentenceValues[1].c_str(), e.what());
+            continue;
+        }
+        
         // If see a new timestamp, report correct location.
         if ((currentTimeStamp - lastTimeStamp) > TIMESTAMP_EPSILON &&
             candidateFixInfo.isValidFix()) {
