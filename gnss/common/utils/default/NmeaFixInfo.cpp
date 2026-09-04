@@ -47,6 +47,7 @@ float NmeaFixInfo::checkAndConvertToFloat(const std::string& sentence) {
     if (sentence.empty()) {
         return std::numeric_limits<float>::quiet_NaN();
     }
+    ALOGD("NMEA stof input: '%s'", sentence.c_str());
     return std::stof(sentence);
 }
 
