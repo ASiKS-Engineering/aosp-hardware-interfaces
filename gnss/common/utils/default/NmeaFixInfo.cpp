@@ -404,8 +404,22 @@ std::unique_ptr<V2_0::GnssLocation> NmeaFixInfo::toGnssLocation() const {
             // or don't set the field.
             .timeUncertaintyNs = 1000000};
 
+    uint16_t flags =
+        V1_0::GnssLocationFlags::HAS_LAT_LONG |
+        V1_0::GnssLocationFlags::HAS_ALTITUDE |
+        V1_0::GnssLocationFlags::HAS_HORIZONTAL_ACCURACY |
+        V1_0::GnssLocationFlags::HAS_VERTICAL_ACCURACY;
+
+    if (std::isfinite(this->speedMetersPerSec)) {
+        flags |= V1_0::GnssLocationFlags::HAS_SPEED;
+    }
+    
+    if (std::isfinite(this->bearingDegrees)) {
+        flags |= V1_0::GnssLocationFlags::HAS_BEARING;
+    }
+    
     V1_0::GnssLocation locationV1 = {
-            .gnssLocationFlags = 0xFF,
+            .gnssLocationFlags = flags,
             .latitudeDegrees = this->getLatDeg(),
             .longitudeDegrees = this->getLngDeg(),
             .altitudeMeters = this->getAltitudeMeters(),
