@@ -193,7 +193,9 @@ void Gnss::handleNmea(const std::string& nmea) {
     if (!mIsActive) {
         return;
     }
-
+    
+    ALOGI("NMEA RX: %s", nmea.c_str());
+    
     if (mIsNmeaActive) {
         reportNmea(nmea);
     }
