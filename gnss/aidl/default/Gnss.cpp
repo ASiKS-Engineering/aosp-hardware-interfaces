@@ -215,7 +215,7 @@ void Gnss::handleNmea(const std::string& nmea) {
             return;
         }
 
-        fixInput = mGprmcLine + mGpggaLine;
+        fixInput = mGprmcLine + "\n" + mGpggaLine;
         mGprmcLine.clear();
         mGpggaLine.clear();
     }
