@@ -222,6 +222,8 @@ void Gnss::handleNmea(const std::string& nmea) {
         mGpggaLine.clear();
     }
 
+    ALOGI("NMEA FIX INPUT: %s", fixInput.c_str());
+    
     auto location = NmeaFixInfo::getAidlLocationFromInputStr(fixInput);
 
     if (location == nullptr) {
