@@ -18,40 +18,58 @@ Rpi5GnssSerial::~Rpi5GnssSerial() {
 }
 
 bool Rpi5GnssSerial::openDevice() {
-    mFd = open(kDevice, O_RDONLY | O_NOCTTY | O_NONBLOCK);
+    bool anyNode = false;
 
-    if (mFd < 0) {
-        LOG(ERROR) << "Failed to open " << kDevice
-                   << ": " << strerror(errno);
-        return false;
+    for (int i = 0; i < kMaxDevices; ++i) {
+        const std::string path = std::string(kDevicePrefix) + std::to_string(i);
+
+        const int fd = open(path.c_str(), O_RDONLY | O_NOCTTY | O_NONBLOCK);
+        if (fd < 0) {
+            if (errno != ENOENT) {
+                anyNode = true;
+                LOG(WARNING) << "Failed to open " << path << ": " << strerror(errno);
+            }
+            continue;
+        }
+        anyNode = true;
+
+        termios tty{};
+
+        if (tcgetattr(fd, &tty) != 0) {
+            LOG(WARNING) << "tcgetattr failed on " << path << ": " << strerror(errno);
+            close(fd);
+            continue;
+        }
+
+        cfmakeraw(&tty);
+
+        tty.c_cflag |= CLOCAL | CREAD;
+        tty.c_cflag &= ~CSTOPB;
+        tty.c_cflag &= ~CRTSCTS;
+        tty.c_cflag &= ~PARENB;
+        tty.c_cflag &= ~CSIZE;
+        tty.c_cflag |= CS8;
+
+        if (tcsetattr(fd, TCSANOW, &tty) != 0) {
+            LOG(WARNING) << "tcsetattr failed on " << path << ": " << strerror(errno);
+            close(fd);
+            continue;
+        }
+
+        mFd = fd;
+        mDevice = path;
+        mReportedMissing = false;
+        LOG(INFO) << "Opened GNSS device " << mDevice;
+        return true;
     }
 
-    termios tty{};
-
-    if (tcgetattr(mFd, &tty) != 0) {
-        LOG(ERROR) << "tcgetattr failed: " << strerror(errno);
-        closeDevice();
-        return false;
+    // Log once per outage, not once per retry.
+    if (!mReportedMissing) {
+        LOG(WARNING) << (anyNode ? "No usable GNSS serial device" : "No GNSS serial device present")
+                     << ", waiting for it to appear";
+        mReportedMissing = true;
     }
-
-    cfmakeraw(&tty);
-
-    tty.c_cflag |= CLOCAL | CREAD;
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-
-    if (tcsetattr(mFd, TCSANOW, &tty) != 0) {
-        LOG(ERROR) << "tcsetattr failed: " << strerror(errno);
-        closeDevice();
-        return false;
-    }
-
-    LOG(INFO) << "Opened GNSS device " << kDevice;
-
-    return true;
+    return false;
 }
 
 void Rpi5GnssSerial::closeDevice() {
@@ -76,9 +94,10 @@ bool Rpi5GnssSerial::start(NmeaCallback callback) {
         mCallback = std::move(callback);
     }
 
-    if (!openDevice()) {
-        return false;
-    }
+    // A missing receiver is not fatal: the reader keeps looking for it, so the receiver can be
+    // plugged in (or re-plugged) at any time.
+    mReportedMissing = false;
+    openDevice();
 
     mRunning = true;
     mLineBuffer.clear();
@@ -120,7 +139,14 @@ void Rpi5GnssSerial::readerLoop() {
 
     while (mRunning) {
         if (mFd < 0) {
-            break;
+            if (!openDevice()) {
+                // Sleep in short steps so stop() is not delayed.
+                for (int waited = 0; mRunning && waited < kReopenIntervalMs; waited += 50) {
+                    usleep(50000);
+                }
+                continue;
+            }
+            mLineBuffer.clear();
         }
 
         const ssize_t bytesRead = read(mFd, buffer, sizeof(buffer));
@@ -173,9 +199,10 @@ void Rpi5GnssSerial::readerLoop() {
             continue;
         }
 
-        LOG(ERROR) << "GNSS serial read failed: "
-                   << strerror(errno);
-        break;
+        // read() == 0 means the device went away (USB unplugged); errors like ENODEV/EIO mean the same.
+        LOG(WARNING) << "GNSS serial " << mDevice << " lost ("
+                     << (bytesRead == 0 ? "end of file" : strerror(errno)) << "), reopening";
+        closeDevice();
     }
 
     mRunning = false;

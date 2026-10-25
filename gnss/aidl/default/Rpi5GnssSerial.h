@@ -33,5 +33,12 @@ private:
 
     std::string mLineBuffer;
 
-    static constexpr const char* kDevice = "/dev/ttyACM0";
+    // The receiver is a USB device: after a re-plug it comes back as ttyACM1, ttyACM2, ... so the
+    // device nodes are probed instead of relying on a fixed name.
+    static constexpr const char* kDevicePrefix = "/dev/ttyACM";
+    static constexpr int kMaxDevices = 10;
+    static constexpr int kReopenIntervalMs = 1000;
+
+    std::string mDevice;
+    bool mReportedMissing = false;
 };
