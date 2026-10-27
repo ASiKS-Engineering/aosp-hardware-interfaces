@@ -30,7 +30,10 @@
 #include <aidl/android/hardware/gnss/measurement_corrections/BnMeasurementCorrectionsInterface.h>
 #include <aidl/android/hardware/gnss/visibility_control/BnGnssVisibilityControl.h>
 #include <atomic>
+#include <chrono>
+#include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include "GnssConfiguration.h"
@@ -99,7 +102,15 @@ class Gnss : public BnGnss {
     std::shared_ptr<GnssMeasurementInterface> mGnssMeasurementInterface;
 
   private:
+    // Satellites of one complete GSV cycle of a talker (GP, GL, GA, ...).
+    struct SvCycle {
+        std::vector<IGnssCallback::GnssSvInfo> sv;
+        std::chrono::steady_clock::time_point time;
+    };
+
     void handleNmea(const std::string& nmea);
+    void updateSvFromNmea(const std::string& nmea);
+    std::vector<IGnssCallback::GnssSvInfo> buildSvList() const;
     void reportLocation(const GnssLocation&);
     void reportSvStatus(const std::vector<IGnssCallback::GnssSvInfo>& svInfoList) const;
     void reportGnssStatusValue(const IGnssCallback::GnssStatusValue gnssStatusValue) const;
@@ -125,6 +136,11 @@ class Gnss : public BnGnss {
     Rpi5GnssSerial mGnssSerial;
     std::string mGprmcLine;
     std::string mGpggaLine;
+
+    // Real satellite status parsed from GSV/GSA, guarded by mNmeaMutex.
+    std::map<std::string, std::vector<IGnssCallback::GnssSvInfo>> mSvPending;
+    std::map<std::string, SvCycle> mSvComplete;
+    std::map<std::string, std::set<int>> mUsedSvKeys;
 
     mutable std::mutex mMutex;
     mutable std::mutex mNmeaMutex;
