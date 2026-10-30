@@ -1132,9 +1132,14 @@ int ExternalCameraDeviceSession::configureV4l2StreamLocked(const SupportedV4L2Fo
     }
 
     int fpsRet = setV4l2FpsLocked(fps);
-    if (fpsRet != 0 && fpsRet != -EINVAL) {
+    // Analog capture drivers have no frame rate control (ENOTTY), the rate follows the TV standard
+    if (fpsRet != 0 && fpsRet != -EINVAL && fpsRet != -ENOTTY) {
         ALOGE("%s: set fps failed: %s", __FUNCTION__, strerror(fpsRet));
         return fpsRet;
+    }
+    if (fpsRet != 0) {
+        // Remember the requested rate, otherwise every request would reconfigure the stream
+        mV4l2StreamingFps = fps;
     }
 
     uint32_t v4lBufferCount = (fps >= kDefaultFps) ? mCfg.numVideoBuffers : mCfg.numStillBuffers;
@@ -2778,7 +2783,8 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
         return false;
     };
 
-    if (req->frameIn->mFourcc != V4L2_PIX_FMT_MJPEG && req->frameIn->mFourcc != V4L2_PIX_FMT_Z16) {
+    if (req->frameIn->mFourcc != V4L2_PIX_FMT_MJPEG && req->frameIn->mFourcc != V4L2_PIX_FMT_Z16 &&
+        req->frameIn->mFourcc != V4L2_PIX_FMT_UYVY) {
         return onDeviceError("%s: do not support V4L2 format %c%c%c%c", __FUNCTION__,
                              req->frameIn->mFourcc & 0xFF, (req->frameIn->mFourcc >> 8) & 0xFF,
                              (req->frameIn->mFourcc >> 16) & 0xFF,
@@ -2826,7 +2832,7 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
     }
 
     // TODO: in some special case maybe we can decode jpg directly to gralloc output?
-    if (req->frameIn->mFourcc == V4L2_PIX_FMT_MJPEG) {
+    if (req->frameIn->mFourcc == V4L2_PIX_FMT_MJPEG || req->frameIn->mFourcc == V4L2_PIX_FMT_UYVY) {
         ATRACE_BEGIN("MJPGtoI420");
         res = 0;
         if (mCameraMuted) {
@@ -2837,6 +2843,17 @@ bool ExternalCameraDeviceSession::OutputThread::threadLoop() {
                     static_cast<uint8_t*>(mYu12FrameLayout.cr), mYu12FrameLayout.cStride, 0, 0,
                     mYu12Frame->mWidth, mYu12Frame->mHeight, mYu12Frame->mWidth,
                     mYu12Frame->mHeight, libyuv::kRotate0, libyuv::FOURCC_RAW);
+        } else if (req->frameIn->mFourcc == V4L2_PIX_FMT_UYVY) {
+            const size_t uyvyStride = 2 * mYu12Frame->mWidth;
+            if (inDataSize < uyvyStride * mYu12Frame->mHeight) {
+                res = -1;
+            } else {
+                res = libyuv::UYVYToI420(
+                        inData, uyvyStride, static_cast<uint8_t*>(mYu12FrameLayout.y),
+                        mYu12FrameLayout.yStride, static_cast<uint8_t*>(mYu12FrameLayout.cb),
+                        mYu12FrameLayout.cStride, static_cast<uint8_t*>(mYu12FrameLayout.cr),
+                        mYu12FrameLayout.cStride, mYu12Frame->mWidth, mYu12Frame->mHeight);
+            }
         } else {
             res = libyuv::MJPGToI420(
                     inData, inDataSize, static_cast<uint8_t*>(mYu12FrameLayout.y),

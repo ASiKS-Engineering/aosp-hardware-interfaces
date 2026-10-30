@@ -22,7 +22,10 @@
 
 #include <aidl/android/hardware/camera/common/Status.h>
 #include <convert.h>
+#include <cutils/properties.h>
 #include <linux/videodev2.h>
+#include <strings.h>
+#include <algorithm>
 #include <regex>
 #include <set>
 
@@ -39,8 +42,14 @@ namespace {
 // Other formats to consider in the future:
 // * V4L2_PIX_FMT_YVU420 (== YV12)
 // * V4L2_PIX_FMT_YVYU (YVYU: can be converted to YV12 or other YUV420_888 formats)
-const std::array<uint32_t, /*size*/ 2> kSupportedFourCCs{
-        {V4L2_PIX_FMT_MJPEG, V4L2_PIX_FMT_Z16}};  // double braces required in C++11
+// V4L2_PIX_FMT_UYVY is used by analog capture dongles (e.g. STK1160). It is only exposed when the
+// device does not offer MJPEG.
+const std::array<uint32_t, /*size*/ 3> kSupportedFourCCs{
+        {V4L2_PIX_FMT_MJPEG, V4L2_PIX_FMT_Z16, V4L2_PIX_FMT_UYVY}};  // double braces required in C++11
+
+// Frame sizes probed with VIDIOC_TRY_FMT for drivers that cannot enumerate them (analog capture).
+const std::array<std::array<uint32_t, 2>, 4> kAnalogProbeSizes{
+        {{720, 576}, {720, 480}, {640, 480}, {320, 240}}};
 
 constexpr int MAX_RETRY = 5;                  // Allow retry v4l2 open failures a few times.
 constexpr int OPEN_RETRY_SLEEP_US = 100'000;  // 100ms * MAX_RETRY = 0.5 seconds
@@ -332,6 +341,7 @@ status_t ExternalCameraDevice::initAvailableCapabilities(
                 hasDepth = true;
                 break;
             case V4L2_PIX_FMT_MJPEG:
+            case V4L2_PIX_FMT_UYVY:
                 hasColor = true;
                 break;
             default:
@@ -633,10 +643,11 @@ status_t ExternalCameraDevice::initOutputCharsKeys(
 
     bool hasDepth = false;
     bool hasColor = false;
+    uint32_t colorFourcc = V4L2_PIX_FMT_MJPEG;
 
     // For V4L2_PIX_FMT_Z16
     std::array<int, /*size*/ 1> halDepthFormats{{HAL_PIXEL_FORMAT_Y16}};
-    // For V4L2_PIX_FMT_MJPEG
+    // For V4L2_PIX_FMT_MJPEG and V4L2_PIX_FMT_UYVY
     std::array<int, /*size*/ 3> halFormats{{HAL_PIXEL_FORMAT_BLOB, HAL_PIXEL_FORMAT_YCbCr_420_888,
                                             HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED}};
 
@@ -646,7 +657,9 @@ status_t ExternalCameraDevice::initOutputCharsKeys(
                 hasDepth = true;
                 break;
             case V4L2_PIX_FMT_MJPEG:
+            case V4L2_PIX_FMT_UYVY:
                 hasColor = true;
+                colorFourcc = supportedFormat.fourcc;
                 break;
             default:
                 ALOGW("%s: format %c%c%c%c is not supported!", __FUNCTION__,
@@ -670,7 +683,7 @@ status_t ExternalCameraDevice::initOutputCharsKeys(
     }
     if (hasColor) {
         status_t ret =
-                initOutputCharsKeysByFormat(metadata, V4L2_PIX_FMT_MJPEG, halFormats,
+                initOutputCharsKeysByFormat(metadata, colorFourcc, halFormats,
                                             ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
                                             ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
                                             ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS,
@@ -839,6 +852,18 @@ void ExternalCameraDevice::getFrameRateList(int fd, double fpsUpperBound,
         }
     }
 
+    if (format->frameRates.empty() && format->fourcc == V4L2_PIX_FMT_UYVY) {
+        // Analog capture drivers cannot enumerate intervals: derive the rate from the TV standard.
+        v4l2_std_id std = 0;
+        bool ntsc = TEMP_FAILURE_RETRY(ioctl(fd, VIDIOC_G_STD, &std)) == 0 &&
+                    (std & V4L2_STD_525_60) != 0;
+        if (ntsc) {
+            format->frameRates.push_back({1001, 30000});
+        } else {
+            format->frameRates.push_back({1, 25});
+        }
+    }
+
     if (format->frameRates.empty()) {
         ALOGE("%s: failed to get supported frame rates for format:%c%c%c%c w %d h %d", __FUNCTION__,
               frameInterval.pixel_format & 0xFF, (frameInterval.pixel_format >> 8) & 0xFF,
@@ -904,6 +929,33 @@ std::vector<SupportedV4L2Format> ExternalCameraDevice::getCandidateSupportedForm
         }
 
         // Found supported format
+        auto addFrameSize = [&](uint32_t width, uint32_t height) {
+            // Disregard h > w formats so all aspect ratio (h/w) <= 1.0
+            // This will simplify the crop/scaling logic down the road
+            if (height > width) {
+                return;
+            }
+
+            // Discard all formats which is smaller than minStreamSize
+            if (width < minStreamSize.width || height < minStreamSize.height) {
+                return;
+            }
+
+            SupportedV4L2Format format{.width = static_cast<int32_t>(width),
+                                       .height = static_cast<int32_t>(height),
+                                       .fourcc = fmtdesc.pixelformat};
+
+            if (format.fourcc == V4L2_PIX_FMT_Z16 && depthEnabled) {
+                updateFpsBounds(fd, cropType, depthFpsLimits, format, outFmts);
+            } else {
+                updateFpsBounds(fd, cropType, fpsLimits, format, outFmts);
+            }
+        };
+
+        if (fmtdesc.pixelformat == V4L2_PIX_FMT_UYVY) {
+            applyAnalogStandard(fd);
+        }
+
         v4l2_frmsizeenum frameSize{.index = 0, .pixel_format = fmtdesc.pixelformat};
         for (; TEMP_FAILURE_RETRY(ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &frameSize)) == 0;
              ++frameSize.index) {
@@ -912,35 +964,53 @@ std::vector<SupportedV4L2Format> ExternalCameraDevice::getCandidateSupportedForm
                       fmtdesc.pixelformat & 0xFF, (fmtdesc.pixelformat >> 8) & 0xFF,
                       (fmtdesc.pixelformat >> 16) & 0xFF, (fmtdesc.pixelformat >> 24) & 0xFF,
                       frameSize.discrete.width, frameSize.discrete.height);
+                addFrameSize(frameSize.discrete.width, frameSize.discrete.height);
+            }
+        }
 
-                // Disregard h > w formats so all aspect ratio (h/w) <= 1.0
-                // This will simplify the crop/scaling logic down the road
-                if (frameSize.discrete.height > frameSize.discrete.width) {
-                    continue;
-                }
-
-                // Discard all formats which is smaller than minStreamSize
-                if (frameSize.discrete.width < minStreamSize.width ||
-                    frameSize.discrete.height < minStreamSize.height) {
-                    continue;
-                }
-
-                SupportedV4L2Format format{
-                        .width = static_cast<int32_t>(frameSize.discrete.width),
-                        .height = static_cast<int32_t>(frameSize.discrete.height),
-                        .fourcc = fmtdesc.pixelformat};
-
-                if (format.fourcc == V4L2_PIX_FMT_Z16 && depthEnabled) {
-                    updateFpsBounds(fd, cropType, depthFpsLimits, format, outFmts);
-                } else {
-                    updateFpsBounds(fd, cropType, fpsLimits, format, outFmts);
+        if (frameSize.index == 0 && fmtdesc.pixelformat == V4L2_PIX_FMT_UYVY) {
+            // The driver cannot enumerate frame sizes: probe the usual analog sizes.
+            for (const auto& size : kAnalogProbeSizes) {
+                v4l2_format probe{};
+                probe.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                probe.fmt.pix.width = size[0];
+                probe.fmt.pix.height = size[1];
+                probe.fmt.pix.pixelformat = V4L2_PIX_FMT_UYVY;
+                if (TEMP_FAILURE_RETRY(ioctl(fd, VIDIOC_TRY_FMT, &probe)) == 0 &&
+                    probe.fmt.pix.pixelformat == V4L2_PIX_FMT_UYVY &&
+                    probe.fmt.pix.width == size[0] && probe.fmt.pix.height == size[1]) {
+                    addFrameSize(size[0], size[1]);
                 }
             }
         }
         fmtdesc.index++;
     }
+
+    // Formats are selected by size only, so keep a single color format per device.
+    bool hasMjpeg = std::any_of(outFmts.begin(), outFmts.end(), [](const auto& f) {
+        return f.fourcc == V4L2_PIX_FMT_MJPEG;
+    });
+    if (hasMjpeg) {
+        outFmts.erase(std::remove_if(outFmts.begin(), outFmts.end(),
+                                     [](const auto& f) { return f.fourcc == V4L2_PIX_FMT_UYVY; }),
+                      outFmts.end());
+    }
     trimSupportedFormats(cropType, &outFmts);
     return outFmts;
+}
+
+void ExternalCameraDevice::applyAnalogStandard(int fd) {
+    v4l2_std_id current = 0;
+    if (TEMP_FAILURE_RETRY(ioctl(fd, VIDIOC_G_STD, &current)) != 0) {
+        return;  // Not an analog capture device
+    }
+
+    char value[PROPERTY_VALUE_MAX] = {};
+    property_get("vendor.camera.analog_std", value, "pal");
+    v4l2_std_id wanted = (strcasecmp(value, "ntsc") == 0) ? V4L2_STD_NTSC : V4L2_STD_PAL;
+    if (current != wanted && TEMP_FAILURE_RETRY(ioctl(fd, VIDIOC_S_STD, &wanted)) != 0) {
+        ALOGW("%s: VIDIOC_S_STD failed: %s", __FUNCTION__, strerror(errno));
+    }
 }
 
 void ExternalCameraDevice::trimSupportedFormats(CroppingType cropType,

@@ -108,6 +108,9 @@ class ExternalCameraDevice : public BnCameraDevice {
 
     static void getFrameRateList(int fd, double fpsUpperBound, SupportedV4L2Format* format);
 
+    // Select the PAL/NTSC standard (property vendor.camera.analog_std) on analog capture devices.
+    static void applyAnalogStandard(int fd);
+
     static void updateFpsBounds(int fd, CroppingType cropType,
                                 const std::vector<ExternalCameraConfig::FpsLimitation>& fpsLimits,
                                 SupportedV4L2Format format,

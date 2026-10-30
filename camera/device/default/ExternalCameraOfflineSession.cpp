@@ -389,7 +389,8 @@ bool ExternalCameraOfflineSession::OutputThread::threadLoop() {
         return false;
     };
 
-    if (req->frameIn->mFourcc != V4L2_PIX_FMT_MJPEG && req->frameIn->mFourcc != V4L2_PIX_FMT_Z16) {
+    if (req->frameIn->mFourcc != V4L2_PIX_FMT_MJPEG && req->frameIn->mFourcc != V4L2_PIX_FMT_Z16 &&
+        req->frameIn->mFourcc != V4L2_PIX_FMT_UYVY) {
         return onDeviceError("%s: do not support V4L2 format %c%c%c%c", __FUNCTION__,
                              req->frameIn->mFourcc & 0xFF, (req->frameIn->mFourcc >> 8) & 0xFF,
                              (req->frameIn->mFourcc >> 16) & 0xFF,
@@ -410,6 +411,28 @@ bool ExternalCameraOfflineSession::OutputThread::threadLoop() {
     if (req->frameIn->getData(&inData, &inDataSize) != 0) {
         lk.unlock();
         return onDeviceError("%s: V4L2 buffer map failed", __FUNCTION__);
+    }
+
+    if (req->frameIn->mFourcc == V4L2_PIX_FMT_UYVY) {
+        const size_t uyvyStride = 2 * mYu12Frame->mWidth;
+        int convRes = -1;
+        if (inDataSize >= uyvyStride * mYu12Frame->mHeight) {
+            convRes = libyuv::UYVYToI420(
+                    inData, uyvyStride, static_cast<uint8_t*>(mYu12FrameLayout.y),
+                    mYu12FrameLayout.yStride, static_cast<uint8_t*>(mYu12FrameLayout.cb),
+                    mYu12FrameLayout.cStride, static_cast<uint8_t*>(mYu12FrameLayout.cr),
+                    mYu12FrameLayout.cStride, mYu12Frame->mWidth, mYu12Frame->mHeight);
+        }
+        if (convRes != 0) {
+            ALOGE("%s: Convert V4L2 UYVY frame to YU12 failed! res %d", __FUNCTION__, convRes);
+            lk.unlock();
+            Status st = parent->processCaptureRequestError(req);
+            if (st != Status::OK) {
+                return onDeviceError("%s: failed to process capture request error!", __FUNCTION__);
+            }
+            signalRequestDone();
+            return true;
+        }
     }
 
     // TODO: in some special case maybe we can decode jpg directly to gralloc output?
